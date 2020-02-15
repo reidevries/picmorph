@@ -7,8 +7,8 @@ import subprocess
 import shlex
 
 M_PI = 3.14
-reduce_width = 400
-reduce_height = 300
+reduce_width = 512
+reduce_height = 512
 
 def getPixel(image, coord):
 	i = coord[0]
@@ -27,13 +27,12 @@ def addColors(colora, colorb):	#expects three-element tuples representing the co
 	newb = max(0, min(1, colora[2]+colorb[2]))
 	return (newr, newg, newb, 255)
 
-def blendColors(colora, colorb, colorc, pos, pixel_alpha):
-	alpha_pos =  float(pixel_alpha)/255
-	newr = int((colora[0]*(1-pos) + colorb[0]*pos)*alpha_pos + colorc[0]*(1-alpha_pos))
-	newg = int((colora[1]*(1-pos) + colorb[1]*pos)*alpha_pos + colorc[1]*(1-alpha_pos))
-	newb = int((colora[2]*(1-pos) + colorb[2]*pos)*alpha_pos + colorc[2]*(1-alpha_pos))
+def blendColors(colora, colorb, pos, alpha):
+	newr = int((colora[0]*(1-pos) + colorb[0]*pos))
+	newg = int((colora[1]*(1-pos) + colorb[1]*pos))
+	newb = int((colora[2]*(1-pos) + colorb[2]*pos))
 
-	return (newr, newg, newb, 255)
+	return (newr, newg, newb, int(alpha))
 
 def reduceSize(image):
 	print("resizing to " +str(reduce_width)+"x"+str(reduce_height)+"...")
@@ -43,9 +42,9 @@ def equalSize(a, b):
 	aw, ah = a.size
 	bw, bh = b.size
 	if (bw == aw and bh == ah):
-		a_out = Image.new("RGBA", (bw,bh), (0,0,0,0))
+		a_out = Image.new("RGBA", (bw,bh), "white")
 		a_out.paste(a)
-		b_out = Image.new("RGBA", (bw,bh), (0,0,0,0))
+		b_out = Image.new("RGBA", (bw,bh), "white")
 		b_out.paste(b)
 		return a_out,b_out
 
@@ -56,9 +55,9 @@ def equalSize(a, b):
 		oh = bh
 	print("resizing both images to " +str(ow)+"x"+str(oh)+"...")
 
-	a_out = Image.new("RGBA", (ow,oh), (0,0,0,0))
+	a_out = Image.new("RGBA", (ow,oh), "white")
 	a_out.paste(a.resize((ow,oh), resample=Image.BILINEAR))
-	b_out = Image.new("RGBA", (ow, oh), (0, 0, 0, 0))
+	b_out = Image.new("RGBA", (ow, oh), "white")
 	b_out.paste(b.resize((ow, oh), resample=Image.BILINEAR))
 	return a_out,b_out
 
@@ -91,8 +90,11 @@ def edgedetect(image, line_width=1):
 
 			g = int(math.sqrt(gx*gx + gy*gy))
 			
-			if (g > 128):
-				newdrawing.ellipse([(i-line_width, j-line_width), (i+line_width, j+line_width)], fill=(0,0,0))
+			if (g > 96):
+				if (line_width > 1):
+					newdrawing.ellipse([(i-line_width/2, j-line_width/2), (i+line_width/2, j+line_width/2)], fill=(0,0,0))
+				else:
+					newdrawing.point((i,j), fill=(0,0,0))
 
 	return newimage
 
@@ -179,6 +181,27 @@ def transformTriangle(image, xy, target_xy):
 	new_image = cropped_image.transform(image.size, Image.PERSPECTIVE, coefficients, resample=Image.BILINEAR)
 	return ImageChops.composite(image, new_image, new_image)
 
+def sortPointListByDistance(points, centre):	#sort with the points closest to the centre first
+	p_num = len(points)
+	p_dist2 = [0]*p_num
+	for i in range(p_num):
+		dist2 = (points[i][0]-centre[0])**2 + (points[i][1]-centre[1])**2
+		p_dist2[i] = dist2
+
+	new_p = points
+	for j in range(p_num):
+		furthest = -1
+		furthest_i = -1
+		for i in range(len(points)):
+			if (p_dist2[i] > furthest):
+				furthest = p_dist2[i]
+				furthest_i = i
+		p_dist2[furthest_i] = -1
+		new_p[p_num-j-1] = points[furthest_i]
+
+	return new_p
+
+
 def matchPointLists(a, b):
 	#find the list with more elements and the one with fewer elements
 	less = a
@@ -224,7 +247,6 @@ def matchPointLists(a, b):
 				matches.append((j, nearesti))
 			else:
 				matches.append((nearesti, j))
-
 	return matches
 
 #interpolate two sets of point lists, 0 < pos < 1. 'matches' is an array of tuples (i,j) where 'i' is an index of a_p and 'j' is an index of b_p
@@ -234,107 +256,22 @@ def interpolatePointLists(a_p, b_p, matches, pos):
 		newlist.append((a_p[m[0]][0]*(1-pos) + b_p[m[1]][0]*pos, a_p[m[0]][1]*(1-pos) + b_p[m[1]][1]*pos))
 	return newlist
 
-#similar to above, but work on the pixels of two images.
-def interpolateImageFromPointLists(a, b, a_p, b_p, a_d, b_d, matches, pos):
-	print("interpolating two images based on points...")
+def clampToSize(coord, size):
+	return (max(min(coord[0], size[0]-1), 0), max(min(coord[1], size[1]-1),0))
 
-	if pos == 0:
-		return a
-	elif pos == 1:
-		return b
-
-	close_to_b = False
-	close_d = a_d
-	close = a
-	if (pos > 0.5):
-		close_to_b = True
-		close_d = b_d
-		close = b
-
-	triangles = getDelaunay(interpolatePointLists(a_p, b_p, matches, pos))
-	base = Image.blend(a, b, pos)
-	new_image = base
-	tri_accumulator = []
-	close_d_accumulator = []
-	counter = 0
-	for i in range(len(triangles)):
-		tri_accumulator.append(triangles[i])
-		if i < len(close_d):
-			close_d_accumulator.append(close_d[i])
-		if i%3 == 2:
-			if (len(close_d_accumulator) == 3 and len(tri_accumulator) == 3):
-				new_triangle = transformTriangle(base, close_d_accumulator, tri_accumulator)
-				blend_pos = math.cos(-3*abs(pos-0.5))	#show the polygon mostly in the middle of the interpolation
-				new_image = ImageChops.blend(new_image, new_triangle, blend_pos)
-				print("created " + str(counter) + "th triangle")
-				counter = counter+1
-			tri_accumulator.clear()
-			if i < len(close_d):
-				close_d_accumulator.clear()
-
-	return new_image
-
-def interpolateImageWithEllipses(a,b,a_p,b_p,matches,pos):
-	print("interpolating two images using ellipses...")
-
-	if pos == 0:
-		return a
-	elif pos == 1:
-		return b
-
-	close_to_b = False
-	close_p = a_p
-	close = a
-	if (pos > 0.5):
-		close_to_b = True
-		close_p = b_p
-		close = b
-
-	base = Image.blend(a,b,pos)
-	points = interpolatePointLists(a_p,b_p,matches,pos)
-	m = matches
-	new_image = Image.new("RGBA", base.size, (0,0,0,0))
-	new_image.paste(base)
-	counter = 0
-	for i in range(len(points)):
-		counter = counter+1
-		coord = points[i]
-		a_p_i = a_p[m[i][0]]
-		b_p_i = b_p[m[i][1]]
-		delta = (b_p_i[0]-a_p_i[0], b_p_i[1]-a_p_i[1])
-		centre = (a_p_i[0]+delta[0]/2, a_p_i[1]+delta[1]/2)
-		perp = math.atan2(delta[1], delta[0])-M_PI/2
-		mag2 = delta[0]*delta[0] + delta[1]*delta[1]
-		perp_edge = (centre[0] + math.cos(perp)*mag2, centre[1] + math.sin(perp)*mag2,
-					 centre[0] - math.cos(perp)*mag2, centre[1] - math.sin(perp)*mag2)
-		cropped = polygonCrop(base, perp_edge)
-		blend_pos = math.cos(-3*abs(pos-0.5))	#show the polygon mostly in the middle of the interpolation
-		new_image = ImageChops.blend(new_image, cropped, blend_pos)
-		print("created ellipse" + str(counter) + "/" + str(len(points)), end="\t")
-	print("DONE")
-	return new_image
-
-def interpolateWithDots(a,b,a_p,b_p,matches,pos):
+def interpolateWithDots(a_pixel,b_pixel,size,a_p,b_p,matches,pos): #expects a and b to be same-sized images
 	print("interpolating two images using dots...")
 
-	if pos == 0:
-		return a
-	elif pos == 1:
-		return b
+	if pos == 0 or pos == 1:
+		return Image.new("RGBA", size, (255,255,255,0))
 
 	close_to_b = False
-	close_p = a_p
-	close = a
 	if (pos > 0.5):
 		close_to_b = True
-		close_p = b_p
-		close = b
 
-	blend_alpha = min(max(pos*2-0.5,0),1)
-	base = Image.blend(a,b,blend_alpha)
+	blend_pos = min(max(pos*2-0.5,0),1)
 
-	new_image = Image.new("RGBA", base.size, (0,0,0,0))
-	new_image.paste(base)
+	new_image = Image.new("RGBA", size, (255,255,255,0))
 	new_drawing = ImageDraw.Draw(new_image)
 
 	points = interpolatePointLists(a_p,b_p,matches,pos)
@@ -345,26 +282,35 @@ def interpolateWithDots(a,b,a_p,b_p,matches,pos):
 		b_p_i = b_p[m[i][1]]
 		dist2_p = 0
 		if close_to_b:
-			dist2_p = int(abs(b_p_i[0] - points[i][0]) + abs(b_p_i[1] - points[i][1]))
+			dist2_p = (int(abs(b_p_i[0] - points[i][0]) + abs(b_p_i[1] - points[i][1])))
 		else:
-			dist2_p = int(abs(a_p_i[0] - points[i][0]) + abs(a_p_i[1] - points[i][1]))
+			dist2_p = (int(abs(a_p_i[0] - points[i][0]) + abs(a_p_i[1] - points[i][1])))
+		dist2_p = dist2_p/2
+		dist2_p_07 = dist2_p*0.7
+		dist2_p_15 = dist2_p*1.5
 
-		for x in range(int(-dist2_p), int(dist2_p+1)):
-			for y in range(int(-dist2_p), int(dist2_p+1)):
-				if (abs(x)+abs(y) <= 2*dist2_p+1):
-					coord = (points[i][0]+x, points[i][1]+y)
-					pixel_alpha = min(8*max(2*float(dist2_p)-float(abs(x)+abs(y)),0),255)
-					a_coord = (a_p_i[0]+x, a_p_i[1]+y)
-					b_coord = (b_p_i[0]+x, b_p_i[1]+y)
-					a_colour = getPixel(a, a_coord)
-					a_colour = (a_colour[0], a_colour[1], a_colour[2], pixel_alpha)
-					b_colour = getPixel(b, b_coord)
-					b_colour = (b_colour[0], b_colour[1], b_colour[2], pixel_alpha)
-					c_colour = getPixel(new_image, coord)
-					new_colour = blendColors(a_colour, b_colour, c_colour, blend_alpha, pixel_alpha)
+		for u in range(int(-dist2_p), int(dist2_p)):
+			for v in range(int(-dist2_p), int(dist2_p)):
+				uv_dist2 = abs(u)+abs(v)
+				if (uv_dist2 <= dist2_p_15):
+					if (uv_dist2 <= dist2_p_07):
+						x = u
+						y = v
+					else:
+						x = abs(u*3)-dist2_p_07
+						y = abs(v*3)-dist2_p_07
+						x = math.copysign(u,x)
+						y = math.copysign(v, y)
+
+					a_coord = clampToSize((a_p_i[0]+x, a_p_i[1]+y), size)
+					b_coord = clampToSize((b_p_i[0]+x, b_p_i[1]+y), size)
+					coord = clampToSize((points[i][0]+x, points[i][1]+y), size)
+
+					alpha = int(256-200*float(uv_dist2)/dist2_p)
+					new_colour = blendColors(a_pixel[a_coord], b_pixel[b_coord], blend_pos, alpha)
 					new_drawing.point(coord, fill=new_colour)
 
-		print("drew dot " + str(i) + "/" + str(len(points)) + " of size " + str(dist2_p), end="\t\t", flush=True)
+		print("drew dot " + str(i) + "/" + str(len(points)) + " of size " + str(dist2_p*2), end="\t\t\t", flush=True)
 	return new_image
 
 
